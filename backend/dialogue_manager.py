@@ -1,13 +1,10 @@
-from openai import OpenAI
+from groq import Groq
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-)
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # ---------------------------------------------------
 # MAIN SYSTEM PROMPT (APPOINTMENT BOOKING)
@@ -286,17 +283,16 @@ def generate_reply(session: dict, last_user_message: str) -> str:
     try:
 
         completion = client.chat.completions.create(
-            model="nvidia/nemotron-3-nano-30b-a3b:free",
+            model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.4,
-            extra_body={"reasoning": {"enabled": True}}
+            temperature=0.4
         )
 
         reply = completion.choices[0].message.content.strip()
 
     except Exception as e:
 
-        print("OpenRouter ERROR:", e)
+        print("Groq ERROR:", e)
 
         reply = "Sorry, something went wrong. Could you please repeat that?"
 
@@ -333,10 +329,9 @@ def feedback(session: dict, user_message: str) -> str:
     try:
 
         completion = client.chat.completions.create(
-            model="nvidia/nemotron-3-nano-30b-a3b:free",
+            model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.4,
-            extra_body={"reasoning": {"enabled": True}}
+            temperature=0.4
         )
 
         reply = completion.choices[0].message.content.strip()
@@ -396,10 +391,9 @@ def noshow_dialogue(session: dict, user_message: str) -> str:
 
     try:
         completion = client.chat.completions.create(
-            model="nvidia/nemotron-3-nano-30b-a3b:free",
+            model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.4,
-            extra_body={"reasoning": {"enabled": True}}
+            temperature=0.4
         )
         reply = completion.choices[0].message.content.strip()
 
