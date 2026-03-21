@@ -1001,19 +1001,6 @@ let asrSendTimestamp     = null;
 let escalationTimer      = null;
 const ESCALATION_TIMEOUT_MS = 30000;
 
-// Check-in prompt — if user hasn't spoken within 10s of starting, ALVA says hello
-let checkInTimer         = null;
-const CHECKIN_TIMEOUT_MS = 10000;
-
-// Pool of check-in phrases so it feels natural, not robotic
-const CHECKIN_PHRASES = [
-  "Hello! Are you there? I'm ALVA, ready to help you book your appointment.",
-  "Hi there! This is ALVA. Are you ready to get started?",
-  "Hello? Just checking in — I'm here whenever you're ready to speak.",
-  "Hi, this is ALVA. I didn't hear anything yet — go ahead whenever you're ready!",
-  "Hello! Are you there? Feel free to speak whenever you're ready.",
-];
-
 /* ═══════════════════════════════════
    MUTE TOGGLE
 ═══════════════════════════════════ */
@@ -1501,7 +1488,6 @@ function startConversation() {
   recognition.onstart = () => {
     setStatus('Listening…', 'listening');
     resetSilenceTimer();
-    startCheckInTimer();  // ← start 10s check-in countdown
   };
 
   recognition.onresult = (event) => {
@@ -1511,7 +1497,6 @@ function startConversation() {
 
     if (!isFinal) {
       lastInterimText = result[0].transcript.trim();
-      clearCheckInTimer();  // ← user is speaking, cancel check-in
       resetSilenceTimer();
       resetPartialTimer();
       return;
@@ -1523,7 +1508,6 @@ function startConversation() {
 
     clearSilenceTimer();
     clearPartialTimer();
-    clearCheckInTimer();  // ← user spoke, no need for check-in
     lastInterimText = '';
 
     addMessage('user', transcript);
@@ -1592,27 +1576,6 @@ function clearSilenceTimer() {
 }
 
 /* ═══════════════════════════════════
-   CHECK-IN TIMER
-   If user hasn't spoken within 10s of
-   pressing Start, ALVA says hello.
-═══════════════════════════════════ */
-function startCheckInTimer() {
-  clearCheckInTimer();
-  checkInTimer = setTimeout(() => {
-    // Only fire if still listening and user hasn't sent anything yet
-    if (conversationActive && !conversationEnded && !isSpeaking) {
-      const phrase = CHECKIN_PHRASES[Math.floor(Math.random() * CHECKIN_PHRASES.length)];
-      addMessage('assistant', phrase);
-      speakText(phrase);
-    }
-  }, CHECKIN_TIMEOUT_MS);
-}
-
-function clearCheckInTimer() {
-  if (checkInTimer) { clearTimeout(checkInTimer); checkInTimer = null; }
-}
-
-/* ═══════════════════════════════════
    PARTIAL UTTERANCE TIMEOUT
 ═══════════════════════════════════ */
 function resetPartialTimer() {
@@ -1664,7 +1627,6 @@ function endConversation() {
   clearSilenceTimer();
   clearPartialTimer();
   clearEscalationTimer();
-  clearCheckInTimer();  // ← clean up on end
   lastInterimText = '';
   window.speechSynthesis.cancel();
   if (recognition) { try { recognition.stop(); } catch (_) {} recognition = null; }

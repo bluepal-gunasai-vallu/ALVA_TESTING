@@ -255,52 +255,238 @@ Rules:
 """
 
 # ---------------------------------------------------
+# SLOT EXTRACTION PROMPT
+# ---------------------------------------------------
+
+SLOT_EXTRACTION_PROMPT = """
+You are a slot extractor for an appointment booking assistant.
+
+Given the user's message and the current collected slots, extract any NEW or UPDATED slot values.
+
+Current slots will be provided. Extract ONLY what the user just mentioned.
+
+Slots to extract:
+- service  (e.g. "dentist", "haircut", "general checkup")
+- date     (e.g. "tomorrow", "next monday", "2026-04-21", "next month" → keep as-is)
+- time     (e.g. "4pm", "16:00", "morning")
+- name     (e.g. "Lakshmi", "John Smith")
+- email    (e.g. "john@gmail.com")
+
+IMPORTANT RULES:
+- If the user says "confirm", "yes", "correct", "proceed", "okay confirm" — output: CONFIRM
+- If the user says "no", "cancel", "stop" — output: CANCEL
+- Otherwise output ONLY a JSON object with the extracted slots (omit slots not mentioned).
+- Do NOT include slots already in current slots unless the user is correcting them.
+- Output raw JSON only, no markdown, no explanation.
+
+Examples:
+User: "dentist appointment" → {"service": "dentist appointment"}
+User: "next month" → {"date": "next month"}
+User: "4:00 p.m." → {"time": "16:00"}
+User: "Lakshmi" → {"name": "Lakshmi"}
+User: "lakshmi@gmail.com" → {"email": "lakshmi@gmail.com"}
+User: "confirm" → CONFIRM
+User: "yes that's correct" → CONFIRM
+User: "proceed" → CONFIRM
+"""
+
+# ---------------------------------------------------
 # APPOINTMENT BOOKING DIALOGUE
 # ---------------------------------------------------
 
-def generate_reply(session: dict, last_user_message: str) -> str:
-
-    # Ensure history exists
-    if "history" not in session:
-        session["history"] = []
-
-    # Save user message
-    session["history"].append({
-        "role": "user",
-        "content": last_user_message
-    })
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "system",
-            "content": f"Current collected slots: {session.get('slots', {})}"
-        }
-    ]
-
-    messages.extend(session["history"])
+def _extract_slots(session: dict, user_message: str) -> str:
+    """
+    Call the LLM to extract slot values from the user message.
+    Returns "CONFIRM", "CANCEL", or a JSON string of extracted slots.
+    """
+    current_slots = session.get("slots", {})
+    prompt = f"Current slots: {current_slots}\nUser message: {user_message}"
 
     try:
-
         completion = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=messages,
-            temperature=0.4
+            messages=[
+                {"role": "system", "content": SLOT_EXTRACTION_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0
         )
-
-        reply = completion.choices[0].message.content.strip()
-
+        result = completion.choices[0].message.content.strip()
+        print(f"[SLOT EXTRACT] raw='{result}'")
+        return result
     except Exception as e:
+        print("Slot extraction ERROR:", e)
+        return "{}"
 
-        print("Groq ERROR:", e)
 
-        reply = "Sorry, something went wrong. Could you please repeat that?"
+def _parse_extracted_slots(raw: str) -> dict:
+    """Parse JSON from slot extraction, stripping markdown fences."""
+    import json, re
+    raw = re.sub(r"```json|```", "", raw).strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
 
-    session["history"].append({
-        "role": "assistant",
-        "content": reply
-    })
 
+def generate_reply(session: dict, last_user_message: str) -> str:
+    """
+    Deterministic slot-filling dialogue manager.
+    - Uses LLM only to EXTRACT slot values from user input.
+    - Python code decides what to ask next (never re-asks filled slots).
+    - Handles confirm/cancel intents explicitly.
+    """
+
+    # Initialise session state
+    if "history" not in session:
+        session["history"] = []
+    if "slots" not in session:
+        session["slots"] = {}
+    if "state" not in session:
+        session["state"] = "collecting"  # states: collecting | awaiting_confirm | done
+
+    # Log user message to history
+    session["history"].append({"role": "user", "content": last_user_message})
+
+    slots = session["slots"]
+    state = session["state"]
+
+    # ------------------------------------------------------------------
+    # 0a. Repeat detection — replay last assistant message
+    # ------------------------------------------------------------------
+    REPEAT_PHRASES = {"repeat", "repeat it", "repeat it again", "say that again",
+                      "say again", "pardon", "what", "come again", "once more",
+                      "can you repeat", "please repeat", "again",
+                      "can you repeat it", "can you repeat it again",
+                      "can you repeat that", "can you say that again",
+                      "could you repeat", "could you repeat that",
+                      "could you repeat it again", "please say that again",
+                      "sorry repeat that", "sorry what was that"}
+    if last_user_message.strip().lower() in REPEAT_PHRASES:
+        history = session.get("history", [])
+        # Find last assistant message (skip the user msg we just appended)
+        for entry in reversed(history[:-1]):
+            if entry["role"] == "assistant":
+                reply = entry["content"]
+                session["history"].append({"role": "assistant", "content": reply})
+                return reply
+        # No previous assistant message found — fall through normally
+
+    # ------------------------------------------------------------------
+    # 0b. Greeting detection — respond warmly without touching slots
+    # ------------------------------------------------------------------
+    GREETINGS = {"hi", "hello", "hey", "good morning", "good afternoon",
+                 "good evening", "howdy", "hiya", "greetings", "sup", "yo"}
+    if last_user_message.strip().lower() in GREETINGS:
+        reply = "Hello! I'm ALVA, your voice appointment assistant. How can I help you today?"
+        session["history"].append({"role": "assistant", "content": reply})
+        return reply
+
+    # ------------------------------------------------------------------
+    # 0b. Repeat detection — re-send last assistant message
+    # ------------------------------------------------------------------
+    REPEAT_PHRASES = {
+        "repeat", "repeat that", "repeat it", "repeat again", "repeat it again",
+        "say that again", "say again", "can you repeat", "can you repeat that",
+        "pardon", "what", "what did you say", "come again", "once more",
+        "i didn't hear", "i didn't get that", "didn't catch that",
+    }
+    if last_user_message.strip().lower() in REPEAT_PHRASES:
+        # Find last assistant message in history (skip the one we just appended)
+        last_reply = None
+        for entry in reversed(session["history"][:-1]):
+            if entry["role"] == "assistant":
+                last_reply = entry["content"]
+                break
+        if last_reply:
+            session["history"].append({"role": "assistant", "content": last_reply})
+            return last_reply
+        # No previous reply yet — fall through to normal flow
+
+    # ------------------------------------------------------------------
+    # 1. Extract intent / slots from user message
+    # ------------------------------------------------------------------
+    raw = _extract_slots(session, last_user_message)
+
+    is_confirm = raw.strip().upper() == "CONFIRM"
+    is_cancel  = raw.strip().upper() == "CANCEL"
+
+    if not is_confirm and not is_cancel:
+        new_slots = _parse_extracted_slots(raw)
+        # Merge new/corrected slots
+        for k, v in new_slots.items():
+            if v:
+                slots[k] = v
+        session["slots"] = slots
+        print(f"[SLOTS NOW] {slots}")
+
+    # ------------------------------------------------------------------
+    # 2. State machine
+    # ------------------------------------------------------------------
+
+    # --- AWAITING CONFIRMATION ---
+    if state == "awaiting_confirm":
+        if is_confirm:
+            session["state"] = "done"
+            reply = (
+                f"Your appointment has been booked successfully. "
+                f"A confirmation will be sent to {slots.get('email', 'your email')}."
+            )
+        elif is_cancel:
+            session["state"] = "collecting"
+            reply = "No problem! Let me know what you'd like to change."
+        else:
+            # User said something else — maybe correcting a slot
+            missing = get_missing_slot_prompt(slots)
+            if missing:
+                session["state"] = "collecting"
+                reply = f"Got it, I've updated that. {missing}"
+            else:
+                # All slots still filled — re-read back
+                reply = build_readback(slots) + "\nPlease say 'confirm' to proceed or let me know what to change."
+        session["history"].append({"role": "assistant", "content": reply})
+        return reply
+
+    # --- DONE ---
+    if state == "done":
+        reply = "Your appointment is already booked. Is there anything else I can help you with?"
+        session["history"].append({"role": "assistant", "content": reply})
+        return reply
+
+    # --- COLLECTING SLOTS ---
+    if is_confirm:
+        # User said confirm but we haven't read back yet — check if all slots filled
+        missing = get_missing_slot_prompt(slots)
+        if missing:
+            reply = f"I still need a bit more information. {missing}"
+        else:
+            session["state"] = "awaiting_confirm"
+            reply = build_readback(slots)
+        session["history"].append({"role": "assistant", "content": reply})
+        return reply
+
+    if is_cancel:
+        reply = "No problem! Let me know if you'd like to start over or book a different appointment."
+        session["history"].append({"role": "assistant", "content": reply})
+        return reply
+
+    # Check what's still missing
+    missing = get_missing_slot_prompt(slots)
+
+    if missing is None:
+        # All slots collected — move to confirmation
+        session["state"] = "awaiting_confirm"
+        reply = build_readback(slots)
+    else:
+        # Acknowledge what was just provided (if anything) + ask next missing slot
+        just_filled = list(_parse_extracted_slots(raw).keys()) if not is_confirm and not is_cancel else []
+        if just_filled:
+            ack = f"Got it, I've noted your {just_filled[-1]}. "
+        else:
+            ack = ""
+        reply = ack + missing
+
+    session["history"].append({"role": "assistant", "content": reply})
     return reply
 
 
@@ -498,5 +684,3 @@ def get_silence_reply(count: int) -> tuple[str, bool]:
         return SILENCE_REPROMPT_2, False
     else:
         return SILENCE_ESCALATE, True
-
-        
