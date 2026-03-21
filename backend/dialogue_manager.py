@@ -498,3 +498,5 @@ def get_silence_reply(count: int) -> tuple[str, bool]:
         return SILENCE_REPROMPT_2, False
     else:
         return SILENCE_ESCALATE, True
+
+        
