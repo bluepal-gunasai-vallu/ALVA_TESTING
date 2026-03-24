@@ -347,8 +347,8 @@ tbody td{padding:12px 16px;vertical-align:middle;color:var(--ink-600);}
 /* ══════════════════════════════════════
    CALENDAR
 ══════════════════════════════════════ */
-.cal-inner{padding:0;}
-.cal-inner iframe{display:block;width:100%;border:none;}
+.cal-inner{padding:0;overflow:hidden;border-radius:0 0 12px 12px;}
+.cal-inner iframe{display:block;width:100%;height:650px;border:none;min-height:500px;}
 
 /* ══════════════════════════════════════
    TWO-COL GRID
@@ -607,7 +607,7 @@ tbody td{padding:12px 16px;vertical-align:middle;color:var(--ink-600);}
       <div class="sc">
         <div class="sc-head"><div class="sc-title-g"><div class="sc-ico violet">📆</div><div><div class="sc-title">Calendar View</div><div class="sc-sub">Synced with Google Calendar</div></div></div></div>
         <div class="cal-inner">
-          <iframe src="https://calendar.google.com/calendar/embed?src=vallugunasai05%40gmail.com&ctz=Asia%2FKolkata" height="620" title="Google Calendar"></iframe>
+          <iframe id="google-cal-frame" src="https://calendar.google.com/calendar/embed?src=vallugunasai05%40gmail.com&ctz=Asia%2FKolkata" height="650" title="Google Calendar" aria-label="Google Calendar"></iframe>
         </div>
       </div>
     </div>
@@ -663,7 +663,7 @@ tbody td{padding:12px 16px;vertical-align:middle;color:var(--ink-600);}
           <div style="flex:1;min-width:200px;">
             <!-- TC087: Filter by service -->
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
-              <label style="font-size:12px;color:var(--ink-400);">Filter by service:</label>
+              <label for="serviceFilter" style="font-size:12px;color:var(--ink-400);">Filter by service:</label>
               <input id="serviceFilter" type="text" placeholder="e.g. basic, specialist…"
                 style="height:28px;padding:0 10px;border:1px solid var(--ink-200);border-radius:var(--r6);font-size:12px;outline:none;width:160px;"
                 oninput="applyServiceFilter()" />
@@ -680,7 +680,7 @@ tbody td{padding:12px 16px;vertical-align:middle;color:var(--ink-600);}
       <!-- Feedback request list -->
       <div class="sc">
         <div class="sc-head">
-          <div class="sc-title-g"><div class="sc-ico violet">💬</div><div><div class="sc-title">Send Feedback Requests</div><div class="sc-sub">Eligible: Confirmed, Rescheduled &amp; Completed appointments</div></div></div>
+          <div class="sc-title-g"><div class="sc-ico violet">💬</div><div><div class="sc-title">Send Feedback Requests</div><div class="sc-sub">Eligible: Completed appointments only</div></div></div>
         </div>
         <div class="reminder-list" id="feedbackList">
           <div class="empty-wrap active"><div class="ei">💬</div><p>Load appointments first to request feedback</p></div>
@@ -1300,10 +1300,13 @@ function renderTable(data) {
     const tr = document.createElement('tr');
     if(isToday) tr.classList.add('is-today');
     let dt = a.date_time||'—';
-    try{ const d=new Date(a.date_time); if(!isNaN(d)) dt=d.toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(_){}
+    try{ const d=new Date((a.date_time||'').replace(' ','T')+'+05:30'); if(!isNaN(d)) dt=d.toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(_){}
 
     const s = (a.state||'').toUpperCase();
-    const isActionable = s === 'CONFIRMED' || s === 'RESCHEDULED';
+    // Complete / No-Show only allowed AFTER the appointment datetime has passed
+    const apptTime = a.date_time ? new Date(a.date_time.replace(' ', 'T') + '+05:30') : null;
+    const isPast = apptTime ? apptTime <= new Date() : false;
+    const isActionable = (s === 'CONFIRMED' || s === 'RESCHEDULED') && isPast;
 
     // Terminal state label shown instead of buttons for non-actionable rows
     const stateLabel = () => {
@@ -1313,6 +1316,9 @@ function renderTable(data) {
         return '<span style="font-size:10.5px;font-weight:600;color:#065f46;background:rgba(5,150,105,0.10);border:1px solid rgba(5,150,105,0.18);padding:2px 8px;border-radius:999px;">Completed</span>';
       if (s === 'NO_SHOW' || s === 'NOSHOW')
         return '<span style="font-size:10.5px;font-weight:600;color:#374151;background:rgba(107,114,128,0.10);border:1px solid rgba(107,114,128,0.2);padding:2px 8px;border-radius:999px;">No-Show</span>';
+      // CONFIRMED or RESCHEDULED but appointment is in the future
+      if ((s === 'CONFIRMED' || s === 'RESCHEDULED') && !isPast)
+        return '<span style="font-size:10.5px;font-weight:600;color:#92400e;background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.25);padding:2px 8px;border-radius:999px;">⏳ Upcoming</span>';
       return '<span style="font-size:11.5px;color:#9ca3af;">—</span>';
     };
 
@@ -1390,18 +1396,18 @@ function renderFeedbackList(data) {
   const list = document.getElementById('feedbackList');
   if(!list) return;
 
-  // TC086: Only CONFIRMED, RESCHEDULED, and COMPLETED are eligible for feedback
-  // CANCELLED appointments never receive feedback calls
+  // TC086: Only COMPLETED appointments are eligible for feedback rating requests
+  // CANCELLED, CONFIRMED, RESCHEDULED appointments do not receive rating buttons
   const eligible = (data||[]).filter(a => {
     const s = (a.state||'').toUpperCase();
-    return s === 'CONFIRMED' || s === 'RESCHEDULED' || s === 'COMPLETED';
+    return s === 'COMPLETED';
   });
 
   if(eligible.length === 0){
     list.innerHTML = `<div class="empty-wrap active">
       <div class="ei">💬</div>
       <p>No eligible appointments for feedback<br>
-      <small style="font-size:11px;opacity:0.6">Feedback is sent to Confirmed, Rescheduled &amp; Completed patients only</small></p>
+      <small style="font-size:11px;opacity:0.6">Feedback requests can only be sent to Completed appointments</small></p>
     </div>`;
     return;
   }

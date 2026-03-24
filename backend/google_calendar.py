@@ -30,7 +30,13 @@ SLOT_DURATION = 60  # minutes per slot
 CLOSED_DAYS = ["Sunday"]
 
 HOLIDAYS = [
+    "2026-03-26",
+    "2026-08-15",
+    "2026-10-02",
+    "2026-10-20",
+    "2026-11-08",
     "2026-12-25"
+
 ]
 
 SERVICE_DURATION = {
@@ -105,7 +111,7 @@ def is_clinic_open(date):
 
     if date in HOLIDAYS:
         next_date = get_next_open_date(date)
-        msg = "The clinic is closed on this date."
+        msg = "The Hospital is closed on this date."
         if next_date:
             msg += f" The next available date is {next_date}."
         return False, msg

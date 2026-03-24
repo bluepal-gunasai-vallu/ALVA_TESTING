@@ -54,7 +54,8 @@ time_period:
   Only extract when the user gives a general period instead of a specific time.
 
 service:
-  The type of appointment or service requested.
+  The type of appointment or service requested,only doctor's appointments, medical services, or related healthcare services.
+  Examples: "general check-up", "dentist appointment", "eye exam", "physical therapy session", "vaccination", "blood test", "cardiology consultation".
 
 name:
   The user's name if mentioned.

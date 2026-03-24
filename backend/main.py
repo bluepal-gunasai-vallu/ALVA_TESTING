@@ -342,6 +342,7 @@ async def agent_websocket(websocket: WebSocket, room_id: str):
             room.end()
 
 
+
 @app.get("/")
 def home():
     return FileResponse("frontend/index.html")
@@ -512,18 +513,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 except (ValueError, IndexError):
                     pass
 
-            # Quick NLU pre-check for human_help intent so the escalation
-            # block can use it (full NLU slot extraction happens later below)
-            _pre_nlu = extract_nlu(text)
-            if _pre_nlu.get("intent") == "human_help":
-                session["_nlu_human_help"] = True
-
             # ── REPEAT REQUEST: replay last ALVA message ───────────────
+            # FIX: check for repeat BEFORE calling NLU to avoid wasting LLM call
             _REPEAT_PHRASES = [
                 "repeat", "say that again", "say it again", "repeat that",
                 "repeat again", "again please", "come again", "pardon",
                 "what did you say", "could you repeat", "can you repeat",
                 "i didn't hear", "didn't catch", "once more", "one more time",
+                "can you repeat it", "can you repeat it again",
+                "repeat it again", "repeat it",
             ]
             _text_lower = text.lower().strip()
             if any(p in _text_lower for p in _REPEAT_PHRASES):
@@ -533,12 +531,22 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     None
                 )
                 if _last_alva:
+                    session.pop("_cached_nlu", None)  # clear stale cache
                     await websocket.send_json({
                         "type": "assistant_reply",
                         "text": _last_alva,
                         "state": state_machine.get_state(),
                     })
                     continue
+            # ───────────────────────────────────────────────────────────
+
+            # Quick NLU pre-check for human_help intent so the escalation
+            # block can use it (full NLU slot extraction happens later below)
+            # CHANGE: cache result so the full NLU block below reuses it (avoids double LLM call)
+            _pre_nlu = extract_nlu(text)
+            session["_cached_nlu"] = _pre_nlu
+            if _pre_nlu.get("intent") == "human_help":
+                session["_nlu_human_help"] = True
             # ───────────────────────────────────────────────────────────
 
             # ══════════════════════════════════════════════════
@@ -580,11 +588,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
             # Explicit customer request for human agent
             # Also catches NLU human_help intent detected earlier in the turn
+            # FIX: skip escalation entirely if we're waiting for user to accept
+            # a suggested next-open date — NLU can misclassify affirmatives like
+            # "yes i like" as human_help with no booking context.
             _wants_human = (
                 is_explicit_human_request(text)
                 or session.get("_nlu_human_help")
             )
             session.pop("_nlu_human_help", None)
+            if _wants_human and session.get("suggested_next_date"):
+                _wants_human = False   # user is responding to date suggestion, not asking for human
             if _wants_human:
                 result = handle_escalation(
                     session=session,
@@ -1132,8 +1145,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             # ---------------------------
 
             # wrap NLU with error logging
+            # CHANGE: reuse cached NLU from pre-check above (avoids double LLM call)
             try:
-                nlu = extract_nlu(text)
+                nlu = session.pop("_cached_nlu", None) or extract_nlu(text)
             except Exception as _nlu_err:
                 log_error(_call_id, "nlu", "failure",
                           detail=str(_nlu_err), recovery_action="fallback_unknown_intent")
@@ -1141,6 +1155,48 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                        "time_period": None, "service": None, "name": None, "email": None}
 
             # update slots
+            # ── RELATIONSHIP-WORD GUARD ──────────────────────────────────────
+            # If NLU extracted a name that is actually a relationship word
+            # (e.g. "friend", "brother"), do NOT store it. Instead ask for
+            # the real name + email immediately.
+            _RELATIONSHIP_WORDS = {
+                "friend", "brother", "sister", "colleague", "mother", "father",
+                "mom", "dad", "husband", "wife", "relative", "patient",
+                "uncle", "aunt", "son", "daughter", "partner", "roommate",
+            }
+            _nlu_name = (nlu.get("name") or "").strip().lower()
+            if _nlu_name in _RELATIONSHIP_WORDS:
+                _whom = nlu["name"]
+                nlu["name"] = None
+                # FIX: save all other valid slots from this message BEFORE skipping
+                # e.g. "dentist appointment for my brother" must still save service="dentist"
+                for _k, _v in nlu.items():
+                    if _k in ("intent", "name", "time_period") or not _v:
+                        continue
+                    if _k == "time":
+                        import dateparser as _dp
+                        _pt = _dp.parse(str(_v))
+                        if _pt:
+                            session["slots"]["time"] = _pt.strftime("%H:%M")
+                    else:
+                        session["slots"][_k] = _v
+                _for_whom_reply = (
+                    f"Sure! Could you please tell me your {_whom}'s "
+                    f"full name and email address?"
+                )
+                session.setdefault("history", []).append(
+                    {"role": "assistant", "content": _for_whom_reply}
+                )
+                log_turn(_call_id, "alva", _for_whom_reply)
+                save_session(session_id, session)
+                await websocket.send_json({
+                    "type":  "assistant_reply",
+                    "text":  _for_whom_reply,
+                    "state": state_machine.get_state(),
+                })
+                continue
+            # ─────────────────────────────────────────────────────────────────
+
             for key, value in nlu.items():
 
                 if key == "intent":
@@ -1173,6 +1229,30 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             # keep last detected intent in session for context packet
             if nlu.get("intent"):
                 session["last_intent"] = nlu["intent"]
+
+            # ── SUGGESTED DATE ACCEPTANCE ────────────────────────────────────
+            # If ALVA suggested a next-open date (e.g. "not open on Sunday,
+            # next available is 2026-03-30") and the user responds with any
+            # affirmative phrase — accept it regardless of NLU intent.
+            if session.get("suggested_next_date"):
+                _YES_PHRASES = {
+                    "yes", "yeah", "yep", "yup", "sure", "okay", "ok",
+                    "alright", "fine", "go ahead", "proceed", "book it",
+                    "i like", "i'd like", "i would like", "like to book",
+                    "yes i like", "yes please", "please", "do it", "confirm",
+                    "that works", "sounds good", "perfect", "great",
+                }
+                _user_lower = text.lower().strip()
+                _is_yes = (
+                    _user_lower in _YES_PHRASES
+                    or any(p in _user_lower for p in _YES_PHRASES)
+                    or nlu.get("intent") in ("confirm", "schedule")
+                )
+                if _is_yes:
+                    session["slots"]["date"] = session.pop("suggested_next_date")
+                    save_session(session_id, session)
+                    # fall through so normal booking flow continues with new date
+            # ─────────────────────────────────────────────────────────────────
 
             # TC030: multi-intent — if the user combines schedule+confirm or
             # reschedule+confirm in one utterance, save the secondary intent
@@ -1264,7 +1344,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             # ---------------------------
             if nlu.get("intent") == "confirm":
 
-                #  user said yes to the suggested next-open date ──
+                #  suggested_next_date already handled above before intent routing
+                # (kept here as safety fallback in case it wasn't consumed)
                 if session.get("suggested_next_date"):
                     session["slots"]["date"] = session.pop("suggested_next_date")
                     save_session(session_id, session)

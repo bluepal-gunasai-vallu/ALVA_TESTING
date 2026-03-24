@@ -117,7 +117,7 @@ def latency_report():
 
 
 # ─────────────────────────────────────────────
-# TC092 — Transcript Logging
+#  Transcript Logging
 # ─────────────────────────────────────────────
 
 @router.post("/transcript/start")

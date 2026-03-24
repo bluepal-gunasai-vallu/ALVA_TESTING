@@ -279,10 +279,19 @@ IMPORTANT RULES:
 - Do NOT include slots already in current slots unless the user is correcting them.
 - Output raw JSON only, no markdown, no explanation.
 
+NAME RULES:
+- If the user mentions "for my friend / brother / sister / colleague / mother / father / mom / dad / husband / wife / relative / patient",
+  that is a RELATIONSHIP WORD, NOT a real name.
+  In this case output: {"_for_whom": "friend"} (or whichever word was used).
+  Do NOT set the "name" slot to a relationship word.
+- Only extract "name" if it is an actual person's name (e.g. "John", "Lakshmi", "Dr. Smith").
+
 Examples:
 User: "dentist appointment" → {"service": "dentist appointment"}
 User: "next month" → {"date": "next month"}
 User: "4:00 p.m." → {"time": "16:00"}
+User: "book for my friend" → {"_for_whom": "friend"}
+User: "it's for my brother" → {"_for_whom": "brother"}
 User: "Lakshmi" → {"name": "Lakshmi"}
 User: "lakshmi@gmail.com" → {"email": "lakshmi@gmail.com"}
 User: "confirm" → CONFIRM
@@ -413,6 +422,22 @@ def generate_reply(session: dict, last_user_message: str) -> str:
 
     if not is_confirm and not is_cancel:
         new_slots = _parse_extracted_slots(raw)
+        # ------------------------------------------------------------------
+        # CHANGE 2: Relationship-word guard
+        # If the LLM flagged a relationship word (e.g. "friend", "brother"),
+        # do NOT store it as name — ask for the real name + email instead.
+        # ------------------------------------------------------------------
+        if "_for_whom" in new_slots:
+            whom = new_slots.pop("_for_whom")
+            slots.pop("_for_whom", None)
+            session["slots"] = slots
+            reply = (
+                f"Sure! Could you please tell me your {whom}'s "
+                f"full name and email address?"
+            )
+            session["history"].append({"role": "assistant", "content": reply})
+            return reply
+        # ------------------------------------------------------------------
         # Merge new/corrected slots
         for k, v in new_slots.items():
             if v:
@@ -657,7 +682,7 @@ def build_readback(slots: dict) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────
-# TC054: Timeout tiers — 2 reprompts then escalate
+# Timeout tiers — 2 reprompts then escalate
 # ──────────────────────────────────────────────────────────────────
 
 SILENCE_REPROMPT_1 = (
